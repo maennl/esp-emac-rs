@@ -28,6 +28,28 @@ pub const DPORT_WIFI_CLK_EN_REG: usize = 0x3FF0_00CC;
 /// EMAC clock enable bit in `DPORT_WIFI_CLK_EN_REG`.
 pub const DPORT_WIFI_CLK_EMAC_EN: u32 = 1 << 14;
 
+/// DPORT core-reset register — pulsing [`DPORT_EMAC_RST`] here releases the
+/// EMAC peripheral from reset. DPORT base = `0x3FF0_0000`, offset `0x0D0`.
+///
+/// Distinct from, and required *in addition to*,
+/// [`DPORT_WIFI_CLK_EN_REG`]/[`DPORT_WIFI_CLK_EMAC_EN`]: the clock-enable
+/// bit ungates the APB clock to the EMAC block, but the block's internal
+/// registers stay held in reset (all reads/writes silently return/discard
+/// a fixed value, as if unclocked) until this reset line is pulsed —
+/// ESP-IDF's `emac_ll_reset_register()` (`emac_ll.h`) does exactly this
+/// right after `emac_ll_enable_bus_clock()`, before any further EMAC
+/// register access. Omitting it was observed on real hardware to produce
+/// exactly that symptom: every EMAC/MDIO register (including PHY reads
+/// relayed through GMACMIIDATA) reading back as a fixed `0`, with no bus
+/// timeout — because the "poll until a status bit clears" pattern used
+/// throughout this driver (DMA software reset, MDIO busy-bit, and every
+/// downstream `PhyDriver::init` reset poll) trivially "succeeds" against
+/// an always-zero register.
+pub const DPORT_CORE_RST_EN_REG: usize = 0x3FF0_00D0;
+
+/// EMAC reset bit in `DPORT_CORE_RST_EN_REG` (bit 7).
+pub const DPORT_EMAC_RST: u32 = 1 << 7;
+
 // =============================================================================
 // IO_MUX
 // =============================================================================
@@ -203,15 +225,30 @@ pub unsafe fn clear_bits(offset: usize, bits: u32) {
 /// ROM I2C for APLL programming, IO_MUX, GPIO Matrix routing) work
 /// before this call — they don't depend on the EMAC peripheral clock.
 /// See `Emac::init` for the canonical ordering.
+///
+/// Also pulses [`DPORT_EMAC_RST`] (`DPORT_CORE_RST_EN_REG`) to release the
+/// peripheral from reset — see that constant's doc comment for why this
+/// is a separate, mandatory step from the clock-enable bit alone (mirrors
+/// ESP-IDF's `emac_ll_enable_bus_clock()` + `emac_ll_reset_register()`
+/// pair in `emac_ll.h`, always called back-to-back).
 #[inline(always)]
 pub fn enable_peripheral_clock() {
-    // SAFETY: DPORT_WIFI_CLK_EN_REG is a known-valid 32-bit register.
+    // SAFETY: DPORT_WIFI_CLK_EN_REG and DPORT_CORE_RST_EN_REG are
+    // known-valid 32-bit registers.
     unsafe {
         let cur = core::ptr::read_volatile(DPORT_WIFI_CLK_EN_REG as *const u32);
         core::ptr::write_volatile(
             DPORT_WIFI_CLK_EN_REG as *mut u32,
             cur | DPORT_WIFI_CLK_EMAC_EN,
         );
+
+        // Pulse the EMAC reset line: assert, then immediately deassert.
+        // `DPORT_CORE_RST_EN_REG` is a plain reset-enable register — other
+        // bits are always 0 here (we own this narrow reset pulse and
+        // nothing else touches this register concurrently), so a direct
+        // write (not read-modify-write) matches ESP-IDF's own sequence.
+        core::ptr::write_volatile(DPORT_CORE_RST_EN_REG as *mut u32, DPORT_EMAC_RST);
+        core::ptr::write_volatile(DPORT_CORE_RST_EN_REG as *mut u32, 0);
     }
 }
 
