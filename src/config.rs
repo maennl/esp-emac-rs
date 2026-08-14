@@ -57,6 +57,31 @@ pub enum RmiiClockConfig {
         /// GPIO for clock input. Must be `Gpio0`.
         gpio: ClkGpio,
     },
+    /// ESP32 APLL generates 50 MHz and drives it out on **GPIO0** via the
+    /// generic "clock output" mux (`PIN_CTRL.CLK_OUT1` → `CLKOUT_CHANNEL_1`
+    /// → GPIO0 IO_MUX function 1), instead of the dedicated EMAC clock-out
+    /// pins used by [`Self::InternalApll`].
+    ///
+    /// GPIO0's EMAC IO_MUX function 5 (`EMAC_TX_CLK`) is hard-wired as an
+    /// **input** inside the EMAC peripheral, so it cannot carry an
+    /// APLL-driven output the way GPIO16/17 do. ESP-IDF instead routes the
+    /// APLL signal through the SoC's independent clock-output mux
+    /// (`esp_clock_output`/`CLKOUT_SIG_APLL`), whose channel 1 is fixed to
+    /// GPIO0 (IO_MUX function 1, `FUNC_GPIO0_CLK_OUT1` — *not* function 5).
+    /// The EMAC-internal clock-source-select bit is programmed identically
+    /// to [`Self::InternalApll`] ("internal"/RMII-output) — only the pad
+    /// routing differs.
+    ///
+    /// ESP-IDF marks this mode "(Experimental!)" — it works on boards that
+    /// wire GPIO0 to the PHY's REF_CLK pin instead of GPIO16/17 (e.g. no
+    /// separate crystal on the PHY), but is documented as potentially
+    /// unreliable with some PHY chips. Also note GPIO0 is a boot-strapping
+    /// pin — this mode only drives the pad after `Emac::init` runs, well
+    /// after reset/boot-mode sampling has completed.
+    InternalApllClkOutGpio0 {
+        /// On-board crystal frequency, see [`XtalFreq`].
+        xtal: XtalFreq,
+    },
 }
 
 /// On-board crystal frequency in MHz, used to pick APLL SDM coefficients

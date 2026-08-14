@@ -294,6 +294,103 @@ pub fn configure_emac_clk_out(gpio: ClkGpio) {
     }
 }
 
+/// `PIN_CTRL` register — selects the clock source for the three SoC-wide
+/// "clock output" channels (`CLK_OUT1/2/3`), independent of the EMAC
+/// peripheral's own IO_MUX function 5. From ESP32 TRM / `soc/gpio_reg.h`.
+const PIN_CTRL_REG: usize = IO_MUX_BASE;
+
+/// `CLK_OUT1` field in `PIN_CTRL` (bits 3:0) — selects which internal
+/// clock signal is routed to `CLKOUT_CHANNEL_1`, which is hard-wired to
+/// GPIO0 (`soc/clkout_channel.h`: `CLKOUT_CHANNEL1_GPIO = GPIO0`).
+const PIN_CTRL_CLK_OUT1_MASK: u32 = 0xF;
+/// `CLK_OUT2` field in `PIN_CTRL` (bits 7:4). Unused by this driver, but
+/// must be cleared — see [`configure_apll_clkout_gpio0`] doc comment on
+/// the ESP32 `PIN_CTRL` reset-default silicon bug.
+const PIN_CTRL_CLK_OUT2_MASK: u32 = 0xF << 4;
+/// `CLK_OUT3` field in `PIN_CTRL` (bits 11:8). Unused by this driver, but
+/// must be cleared — see [`configure_apll_clkout_gpio0`] doc comment.
+const PIN_CTRL_CLK_OUT3_MASK: u32 = 0xF << 8;
+
+/// Clock-output mux source id for the APLL (`soc/clk_tree_defs.h`:
+/// `CLKOUT_SIG_APLL = 6`).
+const CLKOUT_SIG_APLL: u32 = 6;
+
+/// GPIO0 IO_MUX `MCU_SEL` value that routes `CLKOUT_CHANNEL_1` to the pad
+/// (`soc/clkout_channel.h`: `FUNC_GPIO0_CLK_OUT1 = FUNC_GPIO0_CLK_OUT1`,
+/// i.e. IO_MUX function 1). This is deliberately *not* function 5 — that
+/// value selects `EMAC_TX_CLK`, which is an input-only net for GPIO0.
+const IO_MUX_FUNC_CLK_OUT1: u32 = 1;
+
+/// Configure GPIO0 to output the APLL-driven 50 MHz RMII reference clock
+/// via the SoC clock-output mux (`PIN_CTRL.CLK_OUT1` → `CLKOUT_CHANNEL_1`
+/// → GPIO0 IO_MUX function 1), for [`crate::config::RmiiClockConfig::InternalApllClkOutGpio0`].
+///
+/// Unlike [`configure_emac_clk_out`] (GPIO16/17, EMAC-dedicated IO_MUX
+/// function 5), GPIO0 has no such dedicated EMAC clock-output net —
+/// function 5 on GPIO0 is `EMAC_TX_CLK`, an input. This routes the APLL
+/// output through the independent SoC-wide clock-output mux instead,
+/// mirroring ESP-IDF's `esp_clock_output_start(CLKOUT_SIG_APLL, GPIO0, ..)`
+/// path (`esp_eth_mac_esp.c`, `CONFIG_ETH_RMII_CLK_OUTPUT_GPIO0`).
+///
+/// Call [`configure_apll_50mhz`] first (same precondition as the
+/// `InternalApll` path: APLL must be running before the DMA software
+/// reset). The EMAC-internal clock-source-select register is still
+/// programmed as "internal" by `Emac::init`, identical to the GPIO16/17
+/// case — only the pad routing differs.
+///
+/// # ESP32 `PIN_CTRL` silicon bug
+///
+/// `PIN_CTRL`'s reset default is `0xFFF` — all three `CLK_OUTn` fields at
+/// `0xF`. Per ESP-IDF (`esp_clock_output.c`, `esp_clock_output_pin_ctrl_init`,
+/// run as a `__attribute__((constructor))` on every ESP32 boot): "Due to a
+/// hardware bug, `PIN_CTRL` cannot select `0xf` output, whereas `0xf` is the
+/// default value." ESP-IDF zeroes **all three** `CLK_OUTn` fields before
+/// configuring any of them. This driver has no equivalent global startup
+/// hook, so it clears all three fields here, immediately before
+/// programming `CLK_OUT1` — leaving `CLK_OUT2`/`CLK_OUT3` at the buggy
+/// `0xF` default while only patching `CLK_OUT1` was observed to leave the
+/// RMII reference clock silent on real hardware even though the `CLK_OUT1`
+/// field itself was set correctly.
+///
+/// # Safety
+///
+/// Writes to IO_MUX, `PIN_CTRL`, and GPIO registers. Must be called before
+/// DMA reset.
+pub fn configure_apll_clkout_gpio0() {
+    unsafe {
+        // Clear all three CLK_OUTn fields first (silicon-bug workaround,
+        // see doc comment above), then route the APLL clock signal to
+        // CLKOUT_CHANNEL_1 (fixed to GPIO0).
+        let pin_ctrl = core::ptr::read_volatile(PIN_CTRL_REG as *const u32);
+        let cleared = pin_ctrl
+            & !PIN_CTRL_CLK_OUT1_MASK
+            & !PIN_CTRL_CLK_OUT2_MASK
+            & !PIN_CTRL_CLK_OUT3_MASK;
+        core::ptr::write_volatile(
+            PIN_CTRL_REG as *mut u32,
+            cleared | (CLKOUT_SIG_APLL & PIN_CTRL_CLK_OUT1_MASK),
+        );
+
+        // GPIO0 IO_MUX: function 1 (CLK_OUT1), max drive strength, output
+        // (not input) — mirrors `configure_emac_clk_out` but with function
+        // value 1 instead of 5.
+        let io_mux_addr = io_mux_addr_for_clk_gpio(ClkGpio::Gpio0);
+        let val = core::ptr::read_volatile(io_mux_addr as *const u32);
+        core::ptr::write_volatile(
+            io_mux_addr as *mut u32,
+            (val & !MCU_SEL_MASK & !FUN_DRV_MASK & !FUN_IE)
+                | (IO_MUX_FUNC_CLK_OUT1 << 12)
+                | (3 << 10),
+        );
+
+        // Disconnect GPIO Matrix -- use IO_MUX directly.
+        core::ptr::write_volatile((GPIO_FUNC_OUT_SEL_BASE + 0 * 4) as *mut u32, 256);
+
+        // Enable output driver on GPIO0.
+        core::ptr::write_volatile(GPIO_ENABLE_W1TS as *mut u32, 1u32);
+    }
+}
+
 /// Configure a GPIO as EMAC external 50 MHz clock input via IO_MUX.
 ///
 /// Sets IO_MUX to function 5 with input enabled. Disconnects GPIO Matrix
@@ -347,6 +444,41 @@ const fn io_mux_addr_for_clk_gpio(gpio: ClkGpio) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_ctrl_reg_is_io_mux_base() {
+        // PIN_CTRL is IO_MUX offset 0x00 (ESP32 TRM).
+        assert_eq!(PIN_CTRL_REG, IO_MUX_BASE);
+    }
+
+    #[test]
+    fn pin_ctrl_clk_out_field_masks_are_disjoint() {
+        // Each CLK_OUTn field is 4 bits wide and must not overlap its
+        // neighbours, so the silicon-bug workaround (clearing all three
+        // before programming CLK_OUT1) can't accidentally corrupt a field
+        // it didn't mean to touch.
+        assert_eq!(PIN_CTRL_CLK_OUT1_MASK & PIN_CTRL_CLK_OUT2_MASK, 0);
+        assert_eq!(PIN_CTRL_CLK_OUT2_MASK & PIN_CTRL_CLK_OUT3_MASK, 0);
+        assert_eq!(PIN_CTRL_CLK_OUT1_MASK & PIN_CTRL_CLK_OUT3_MASK, 0);
+        assert_eq!(PIN_CTRL_CLK_OUT1_MASK, 0xF);
+        assert_eq!(PIN_CTRL_CLK_OUT2_MASK, 0xF0);
+        assert_eq!(PIN_CTRL_CLK_OUT3_MASK, 0xF00);
+    }
+
+    #[test]
+    fn clkout_sig_apll_value() {
+        // soc/clk_tree_defs.h: CLKOUT_SIG_APLL = 6.
+        assert_eq!(CLKOUT_SIG_APLL, 6);
+        assert_eq!(CLKOUT_SIG_APLL & PIN_CTRL_CLK_OUT1_MASK, CLKOUT_SIG_APLL);
+    }
+
+    #[test]
+    fn io_mux_func_clk_out1_is_not_emac_func5() {
+        // FUNC_GPIO0_CLK_OUT1 = 1, distinct from IO_MUX_FUNC_EMAC = 5 used
+        // by `configure_emac_clk_out`/`configure_emac_clk_in` on GPIO16/17.
+        assert_eq!(IO_MUX_FUNC_CLK_OUT1, 1);
+        assert_ne!(IO_MUX_FUNC_CLK_OUT1, 5);
+    }
 
     #[test]
     fn clk_gpio_io_mux_addresses() {

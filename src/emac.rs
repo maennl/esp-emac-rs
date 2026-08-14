@@ -221,9 +221,11 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
     ///
     /// Sequence (mirrors the canonical ESP32 GMAC bring-up):
     /// 1. APLL 50 MHz programming — only when MCU is the RMII clock master
-    ///    (`RmiiClockConfig::InternalApll`); skipped for `External`.
+    ///    (`RmiiClockConfig::InternalApll` / `InternalApllClkOutGpio0`);
+    ///    skipped for `External`.
     /// 2. RMII reference-clock pad routing (GPIO0 input for External,
-    ///    GPIO16/17 output for InternalApll).
+    ///    GPIO16/17 output for InternalApll, or GPIO0 output via the SoC
+    ///    clock-output mux for InternalApllClkOutGpio0).
     /// 3. SMI + RMII data-pin routing.
     /// 4. DPORT EMAC peripheral clock enable.
     /// 5. PHY interface mode (RMII) + clock source select.
@@ -278,16 +280,31 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         //    of the EMAC peripheral clock (only writes RTC analog +
         //    ROM I2C on the always-on APB), so order here doesn't
         //    matter. Skipped entirely for `External`.
-        if let RmiiClockConfig::InternalApll { xtal, .. } = self.config.clock {
-            crate::clock::configure_apll_50mhz(xtal);
+        //
+        //    `InternalApllClkOutGpio0` also needs the APLL running (its
+        //    GPIO0 pad routing goes through the separate SoC clock-output
+        //    mux, not the EMAC-dedicated pins, but the APLL programming
+        //    step is identical).
+        match self.config.clock {
+            RmiiClockConfig::InternalApll { xtal, .. }
+            | RmiiClockConfig::InternalApllClkOutGpio0 { xtal } => {
+                crate::clock::configure_apll_50mhz(xtal);
+            }
+            RmiiClockConfig::External { .. } => {}
         }
 
         // 2. Route the RMII reference-clock pad: input on GPIO0 for
-        //    `External`, or output on GPIO16/17 for `InternalApll`.
+        //    `External`, output on GPIO16/17 for `InternalApll` (EMAC
+        //    IO_MUX function 5), or output on GPIO0 for
+        //    `InternalApllClkOutGpio0` (SoC clock-output mux, since
+        //    GPIO0's EMAC function 5 is input-only).
         match self.config.clock {
             RmiiClockConfig::External { gpio } => crate::clock::configure_emac_clk_in(gpio),
             RmiiClockConfig::InternalApll { gpio, .. } => {
                 crate::clock::configure_emac_clk_out(gpio)
+            }
+            RmiiClockConfig::InternalApllClkOutGpio0 { .. } => {
+                crate::clock::configure_apll_clkout_gpio0()
             }
         }
 
@@ -303,7 +320,9 @@ impl<const RX: usize, const TX: usize, const BUF: usize> Emac<RX, TX, BUF> {
         ext_regs::set_rmii_mode();
         match self.config.clock {
             RmiiClockConfig::External { .. } => ext_regs::set_rmii_clock_external(),
-            RmiiClockConfig::InternalApll { .. } => ext_regs::set_rmii_clock_internal(),
+            RmiiClockConfig::InternalApll { .. } | RmiiClockConfig::InternalApllClkOutGpio0 { .. } => {
+                ext_regs::set_rmii_clock_internal()
+            }
         }
 
         // 6. EMAC extension clocks + RAM power.
