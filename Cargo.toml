@@ -32,14 +32,13 @@ rustdoc-args   = ["--cfg", "docsrs"]
 embedded-hal       = "1.0"
 embedded-hal-async = { version = "1.0", optional = true }
 esp-hal            = { version = "1.1.0", features = ["esp32", "unstable"], optional = true }
-# `eth-mdio-phy` ships in the sibling eth-phy-rs workspace. The
-# `path` dep resolves locally when this crate is consumed alongside
-# eth-phy-rs (the JetHome firmware super-repo's recommended layout).
-# The `version` field is what cargo emits to the registry once the
-# crate publishes — kept in lockstep with the actual eth-mdio-phy
-# version this driver is tested against, so registry consumers don't
-# accidentally pick up an older patch via `^0.1.0` caret resolution.
-eth-mdio-phy       = { version = "0.3.0", path = "../eth-phy/crates/eth-mdio-phy", optional = true }
+# `eth-mdio-phy` ships in the sibling eth-phy-rs workspace upstream (the
+# JetHome firmware super-repo's recommended layout), normally resolved
+# via a local `path` override. This fork drops that `path` override so
+# the crate resolves `eth-mdio-phy` straight from crates.io when consumed
+# standalone (e.g. as a plain Cargo git dependency, without the sibling
+# workspace checked out) — the `version` pin is unchanged.
+eth-mdio-phy       = { version = "0.3.0", optional = true }
 embassy-net-driver = { version = "0.2", optional = true }
 embassy-sync       = { version = "0.8", optional = true }
 critical-section   = { version = "1.2", optional = true }
@@ -56,11 +55,9 @@ critical-section = { version = "1.2", features = ["std"] }
 # Gated to `target_os = "none"` so they are never resolved on the host
 # (where `cargo test` runs against $HOST_TARGET).
 #
-# `eth-phy-lan87xx` is referenced through a sibling path; building
-# `cargo build --example embassy_net_lan8720a` from a standalone clone
-# of this repository requires `eth-phy-rs` checked out alongside (see
-# the example's docstring). Once published to crates.io this becomes
-# a plain `version = "..."` dep.
+# `eth-phy-lan87xx` was referenced through a sibling path upstream; this
+# fork resolves it from crates.io instead (see the `eth-mdio-phy` comment
+# above — same rationale, dropped `path` override for standalone use).
 [target.'cfg(target_os = "none")'.dev-dependencies]
 embassy-executor = "0.10"
 embassy-net      = { version = "0.9", features = ["dhcpv4", "medium-ethernet"] }
@@ -69,7 +66,7 @@ esp-backtrace    = { version = "0.19.0", features = ["esp32", "panic-handler", "
 esp-println      = { version = "0.17.0", default-features = false, features = ["esp32", "uart"] }
 esp-rtos         = { version = "0.3.0", features = ["esp32", "embassy"] }
 esp-sync         = { version = "0.2.1", features = ["esp32"] }
-eth-phy-lan87xx  = { version = "0.3.0", path = "../eth-phy/crates/eth-phy-lan87xx" }
+eth-phy-lan87xx  = { version = "0.3.0" }
 static_cell      = "2"
 
 [[example]]
