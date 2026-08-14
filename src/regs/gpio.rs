@@ -174,11 +174,13 @@ fn configure_mdc(gpio_num: u8) {
             write_reg(iomux, new_val);
         }
         gpio_output_enable_set(gpio_num);
+        // Matches ESP-IDF's `esp_rom_gpio_connect_out_signal(gpio, sig, false,
+        // false)`: only the signal-select field is written, no `GPIO_OEN_SEL`.
+        // Output-enable comes from the unconditional `gpio_output_enable_set`
+        // call above (mirrors the ROM function's own unconditional
+        // `GPIO_ENABLE_W1TS` write) — MDC never needs to tri-state.
         let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
-        write_reg(
-            out_sel,
-            (EMAC_MDC_O_IDX & GPIO_FUNC_OUT_SEL_MASK) | GPIO_OEN_SEL,
-        );
+        write_reg(out_sel, EMAC_MDC_O_IDX & GPIO_FUNC_OUT_SEL_MASK);
     }
 }
 
@@ -193,12 +195,17 @@ fn configure_mdio(gpio_num: u8) {
             write_reg(iomux, new_val);
         }
         gpio_output_enable_set(gpio_num);
-        // GPIO output → EMAC_MDO_O (peripheral controls OE).
+        // GPIO output → EMAC_MDO_O. As in `configure_mdc`, this mirrors
+        // ESP-IDF's `esp_rom_gpio_connect_out_signal` exactly (signal-select
+        // field only, no `GPIO_OEN_SEL`) — setting `GPIO_OEN_SEL` here was
+        // observed on real hardware to make every MDIO read come back as a
+        // fixed 0 (ESP32 permanently driving the shared MDIO line, stomping
+        // over the PHY's response) despite the MDIO transaction itself
+        // completing (busy-bit clears, `GMACMIIADDR` reflects the correct
+        // PHY/register address) — i.e. exactly the state-machine level looks
+        // fine, only the physical bus contention is wrong.
         let out_sel = GPIO_BASE + GPIO_FUNC_OUT_SEL_CFG_BASE + (gpio_num as usize * 4);
-        write_reg(
-            out_sel,
-            (EMAC_MDO_O_IDX & GPIO_FUNC_OUT_SEL_MASK) | GPIO_OEN_SEL,
-        );
+        write_reg(out_sel, EMAC_MDO_O_IDX & GPIO_FUNC_OUT_SEL_MASK);
         // EMAC_MDI_I ← GPIO input.
         let in_sel = GPIO_BASE + GPIO_FUNC_IN_SEL_CFG_BASE + (EMAC_MDI_I_IDX as usize * 4);
         write_reg(
