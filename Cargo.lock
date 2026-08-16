@@ -842,10 +842,14 @@ dependencies = [
 [[package]]
 name = "eth-mdio-phy"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca7a78ebfd472acfe9cdf07234401e00332e2559fb68633605a9cae2daed2106"
 
 [[package]]
 name = "eth-phy-lan87xx"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "325b15cf0cb6bbf3853373427b58911c93d70146658ee9cb1299af1bf91f1c6e"
 dependencies = [
  "embedded-hal 1.0.0",
  "eth-mdio-phy",
